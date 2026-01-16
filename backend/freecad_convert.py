@@ -500,16 +500,24 @@ def convert_step_to_dxf(step_path: str, out_dxf: str, opts: Optional[ConvertOpti
     opts = opts or ConvertOptions()
 
     if not os.path.exists(step_path):
-        raise ConvertError(f"STEP 파일이 없습니다: {step_path}")
+        raise ConvertError(f"CAD 파일이 없습니다: {step_path}")
 
     os.makedirs(os.path.dirname(out_dxf) or ".", exist_ok=True)
     doc = FreeCAD.newDocument("ConvertDoc")
 
+    ext = os.path.splitext(step_path.lower())[1]
+
     try:
-        import Import  # type: ignore
-        Import.insert(step_path, doc.Name)
+        # ✅ STEP/STP는 Import, IGS/IGES는 Part.insert 사용
+        if ext in [".igs", ".iges"]:
+            Part.insert(step_path, doc.Name)
+        else:
+            import Import  # type: ignore
+            Import.insert(step_path, doc.Name)
+
         doc.recompute()
 
+        # ---- 여기부터는 import 성공 후 공통 로직 (반드시 try 안에서 실행) ----
         shapes = []
         for obj in doc.Objects:
             if hasattr(obj, "Shape") and getattr(obj.Shape, "ShapeType", ""):
@@ -517,7 +525,7 @@ def convert_step_to_dxf(step_path: str, out_dxf: str, opts: Optional[ConvertOpti
                     shapes.append(obj.Shape)
 
         if not shapes:
-            raise ConvertError("STEP에서 유효한 Shape을 찾지 못했습니다.")
+            raise ConvertError("CAD 파일에서 유효한 Shape을 찾지 못했습니다(지원 형식/파일 손상 가능).")
 
         shape = shapes[0]
         if len(shapes) > 1:
@@ -624,11 +632,22 @@ def convert_step_to_dxf(step_path: str, out_dxf: str, opts: Optional[ConvertOpti
         return {
             "status": "failed",
             "reason": "no_candidate_passed_section_constancy",
+            "message": (
+                "레이저 커팅(두께 일정) 형상으로 판정되지 않았습니다. "
+                "CNC 가공을 선택하시거나, 모델을 검토해 주세요."
+            ),
             "k": opts.k_face_candidates,
             "n_slices": opts.n_slices,
             "rel_tol": opts.rel_tol,
             "debug": debug_info if opts.debug else None,
         }
+
+    except ConvertError:
+        # ConvertError는 그대로 위로
+        raise
+    except Exception as e:
+        # 그 외 예외는 ConvertError로 감싸서 올림
+        raise ConvertError(f"CAD import/processing 실패 ({ext}): {type(e).__name__}: {e}")
 
     finally:
         try:

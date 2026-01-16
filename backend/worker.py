@@ -1,5 +1,5 @@
 from typing import Any
-from .freecad_convert import convert_step_to_dxf, ConvertOptions, ConvertError
+from freecad_convert import convert_step_to_dxf, ConvertOptions, ConvertError
 
 
 def run_quote(step_path: str, tmp_dxf_path: str) -> dict[str, Any]:
@@ -16,6 +16,9 @@ def run_quote(step_path: str, tmp_dxf_path: str) -> dict[str, Any]:
         return convert_step_to_dxf(step_path, tmp_dxf_path, opts)
     except ConvertError as e:
         return {"status": "error", "message": str(e)}
+    except Exception as e:
+        # ✅ 어떤 예외든 500 방지
+        return {"status": "error", "message": f"{type(e).__name__}: {e}"}
 
 
 def run_convert(step_path: str, out_dxf_path: str) -> dict[str, Any]:
@@ -31,3 +34,5 @@ def run_convert(step_path: str, out_dxf_path: str) -> dict[str, Any]:
         return convert_step_to_dxf(step_path, out_dxf_path, opts)
     except ConvertError as e:
         return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": f"{type(e).__name__}: {e}"}

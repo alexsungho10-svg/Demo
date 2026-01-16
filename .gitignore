@@ -19,3 +19,10 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# runtime data / artifacts
+backend/data/
+*.db
+
+# secrets
+web/.env.local

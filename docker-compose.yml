@@ -2,10 +2,12 @@ services:
   backend:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     volumes:
       - ./backend/data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
+      - QT_QPA_PLATFORM=offscreen
+      - PYTHONPATH=/app/backend:/usr/lib/freecad-python3/lib:/usr/lib/python3/dist-packages:/usr/share/freecad/Mod

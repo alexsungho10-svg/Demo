@@ -1,80 +1,60 @@
 // web/lib/api.ts
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  "https://step-laser-proxy.alexsungho10.workers.dev";
 
-async function readJson(res: Response) {
-  const txt = await res.text();
-  try {
-    return JSON.parse(txt);
-  } catch {
-    return { raw: txt };
+function buildUrl(path: string) {
+  // path는 "/api/quote" 처럼 시작한다고 가정
+  return `${API_BASE}${path}`;
+}
+
+async function readJson<T>(r: Response): Promise<T> {
+  if (!r.ok) {
+    const txt = await r.text().catch(() => "");
+    throw new Error(`API ${r.status}: ${txt}`);
   }
+  return (await r.json()) as T;
 }
 
-export async function createJob(input: {
-  material: string;
-  thickness_mm: number; // 0이면 자동
-  qty: number;
-}) {
-  const res = await fetch(`${API_BASE}/v1/jobs`, {
+/**
+ * ✅ 예: 견적 API
+ * (너희가 /api/quote 를 쓰고 있으면 그대로 동작)
+ */
+export async function postQuote(formData: FormData) {
+  const r = await fetch(buildUrl("/api/quote"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
+    body: formData,
   });
-  if (!res.ok) throw new Error(`createJob failed: ${res.status} ${await res.text()}`);
-  return (await res.json()) as { id: string; status: string };
+  return readJson<any>(r);
 }
 
-export async function uploadStep(jobId: string, file: File) {
-  const fd = new FormData();
-  fd.append("step", file);
-
-  const res = await fetch(`${API_BASE}/v1/jobs/${jobId}/upload`, {
+/**
+ * ✅ 예: job 생성/업로드 API가 따로 있으면 여기에 맞춰 추가
+ * 아래는 샘플 구조라 너희 백엔드 라우트에 맞게 수정하면 됨.
+ */
+export async function createJob(formData: FormData) {
+  const r = await fetch(buildUrl("/api/jobs"), {
     method: "POST",
-    body: fd,
+    body: formData,
   });
-  if (!res.ok) throw new Error(`uploadStep failed: ${res.status} ${await res.text()}`);
-  return await res.json();
-}
-
-export async function quote(jobId: string) {
-  const res = await fetch(`${API_BASE}/v1/jobs/${jobId}/quote`, { method: "POST" });
-  if (!res.ok) throw new Error(`quote failed: ${res.status} ${await res.text()}`);
-  return await res.json();
-}
-
-export async function start(jobId: string) {
-  const res = await fetch(`${API_BASE}/v1/jobs/${jobId}/start`, { method: "POST" });
-  if (!res.ok) throw new Error(`start failed: ${res.status} ${await res.text()}`);
-  return await res.json();
+  return readJson<any>(r);
 }
 
 export async function getJob(jobId: string) {
-  const res = await fetch(`${API_BASE}/v1/jobs/${jobId}`);
-  if (!res.ok) throw new Error(`getJob failed: ${res.status} ${await res.text()}`);
-  return await res.json();
-}
-
-export function previewSvgUrl(jobId: string) {
-  return `${API_BASE}/v1/jobs/${jobId}/preview.svg`;
-}
-
-export function downloadDxfUrl(jobId: string) {
-  return `${API_BASE}/v1/jobs/${jobId}/download/dxf`;
-}
-
-export async function seedVendor() {
-  const res = await fetch(`${API_BASE}/v1/vendors/seed`, { method: "POST" });
-  if (!res.ok) throw new Error(`seedVendor failed: ${res.status} ${await res.text()}`);
-  return await res.json();
-}
-
-export async function dispatch(jobId: string, vendor_id: string) {
-  const res = await fetch(`${API_BASE}/v1/jobs/${jobId}/dispatch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ vendor_id }),
+  const r = await fetch(buildUrl(`/api/jobs/${encodeURIComponent(jobId)}`), {
+    method: "GET",
   });
-  if (!res.ok) throw new Error(`dispatch failed: ${res.status} ${await res.text()}`);
-  return await res.json();
+  return readJson<any>(r);
+}
+
+/**
+ * ✅ 예: 변환 시작 엔드포인트가 있다면
+ * (없으면 삭제해도 됨)
+ */
+export async function startConvert(jobId: string) {
+  const r = await fetch(
+    buildUrl(`/api/jobs/${encodeURIComponent(jobId)}/convert`),
+    { method: "POST" }
+  );
+  return readJson<any>(r);
 }

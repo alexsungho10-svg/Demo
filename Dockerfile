@@ -1,17 +1,70 @@
-FROM python:3.11-slim
+# ===============================
+# Base image
+# ===============================
+FROM python:3.11-bookworm
 
+# ===============================
+# System packages (FreeCAD + Qt headless)
+# ===============================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    freecad \
+    freecad-common \
+    freecad-python3 \
+    libgl1 \
+    libglib2.0-0 \
+    libxkbcommon0 \
+    libxrender1 \
+    libxext6 \
+    libsm6 \
+    libx11-6 \
+    libxcb1 \
+    libxcb-render0 \
+    libxcb-shm0 \
+    libxcb-xfixes0 \
+    libxrandr2 \
+    libxi6 \
+    libxinerama1 \
+    libxcursor1 \
+    libxdamage1 \
+    libfontconfig1 \
+    libfreetype6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# ===============================
+# Workdir
+# ===============================
 WORKDIR /app
 
-# (주의) FreeCADCmd/Part 모듈이 필요한 경우: 기존 네 FreeCAD 기반 이미지/Dockerfile을 쓰는게 정답.
-# 지금 Dockerfile은 "API/DB/흐름" 샘플용.
-# FreeCAD가 필요한 운영 환경이면 기존 FreeCADCmd 이미지 기반으로 병합해줘.
-
+# ===============================
+# Python deps
+# ===============================
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# ===============================
+# App source
+# ===============================
 COPY backend /app/backend
 
+# ===============================
+# Environment (🔥 핵심)
+# ===============================
+# Qt GUI 완전 차단 (서버용)
+ENV QT_QPA_PLATFORM=offscreen
+
+# FreeCAD Python 경로
+ENV PYTHONPATH=/app/backend:/usr/lib/python3/dist-packages:/usr/lib/freecad-python3/lib:/usr/lib/freecad/lib:/usr/share/freecad/Mod
+
+# Python 로그 즉시 출력
 ENV PYTHONUNBUFFERED=1
+
+# ===============================
+# Port
+# ===============================
 EXPOSE 8000
 
+# ===============================
+# Run server
+# ===============================
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
