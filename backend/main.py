@@ -2,6 +2,7 @@ import io
 import json
 import os
 import uuid
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -33,12 +34,19 @@ from dispatcher import build_dispatch_payload, payload_to_json
 # 업로드 허용 확장자
 ALLOWED_EXTS = {".step", ".stp", ".igs", ".iges"}
 
-
 def get_ext(filename: str) -> str:
     return os.path.splitext((filename or "").lower())[1]
 
 
 app = FastAPI(title="STEP / IGES → Laser DXF Converter API", version="4.3.0")
+
+# ✅ uvicorn logger
+logger = logging.getLogger("uvicorn.error")
+
+# ✅ 외부에 노출할 base url 강제(선택)
+# 예) PUBLIC_BASE_URL="https://step-laser-proxy.xxx.workers.dev/api-step-converter"
+# 또는 "http://141.164.49.94.sslip.io:8080"
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
 # CORS (운영 시 도메인 제한 권장)
 app.add_middleware(
@@ -49,10 +57,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def now():
     return datetime.utcnow()
-
 
 def _safe_json_load(s: str | None, default):
     if not s:
@@ -62,9 +68,13 @@ def _safe_json_load(s: str | None, default):
     except Exception:
         return default
 
+def _base_url(request: Request) -> str:
+    if PUBLIC_BASE_URL:
+        return str(PUBLIC_BASE_URL).rstrip("/")
+    return str(request.base_url).rstrip("/")
 
 def job_to_out(job: Job, request: Request) -> JobOut:
-    base_url = str(request.base_url).rstrip("/")
+    base_url = _base_url(request)
 
     metrics = _safe_json_load(getattr(job, "metrics_json", None), None)
     validation = _safe_json_load(getattr(job, "validation_json", None), None)
@@ -76,10 +86,11 @@ def job_to_out(job: Job, request: Request) -> JobOut:
     svg_url = None
     dxf_url = None
 
+    # ✅ URL은 "파일 존재" 기준으로만 내려주기 (status와 분리)
     if preview_svg_path(job.id).exists():
         svg_url = f"{base_url}/v1/jobs/{job.id}/preview.svg"
 
-    if dxf_path(job.id).exists() and job.status == JobStatus.DONE:
+    if dxf_path(job.id).exists():
         dxf_url = f"{base_url}/v1/jobs/{job.id}/download/dxf"
 
     # quotes -> ProcessQuoteOut 리스트로 변환(있으면)
@@ -88,7 +99,6 @@ def job_to_out(job: Job, request: Request) -> JobOut:
         try:
             quotes_out = [ProcessQuoteOut(**q) for q in quotes]
         except Exception:
-            # 저장된 quotes_json 포맷이 살짝 달라도 서버가 죽지 않도록
             quotes_out = None
 
     return JobOut(
@@ -100,10 +110,8 @@ def job_to_out(job: Job, request: Request) -> JobOut:
         thickness_mm=job.thickness_mm,
         qty=job.qty,
         thickness_auto_mm=job.thickness_auto_mm,
-        # 레거시(호환용) 대표 견적
         unit_won=job.unit_won,
         total_won=job.total_won,
-        # ✅ 공정별 견적
         quotes=quotes_out,
         metrics=metrics,
         validation=validation,
@@ -112,26 +120,21 @@ def job_to_out(job: Job, request: Request) -> JobOut:
         svg_url=svg_url,
     )
 
-
 @app.on_event("startup")
 def _startup():
     ensure_data_root()
     init_db()
 
-
 @app.get("/health")
 def health():
     return {"ok": True}
 
-
 @app.post("/v1/jobs", response_model=JobOut)
 def create_job(payload: CreateJobIn, request: Request):
-    # ✅ 공정 미선택 시 400
-    if not payload.processes:
-        raise HTTPException(status_code=400, detail="가공 방식을 선택해 주세요")
+    # ✅ MVP: 공정 미선택이면 기본 laser로 강제
+    processes = payload.processes or ["laser"]
 
     job_id = str(uuid.uuid4())
-
     db = SessionLocal()
     try:
         job = Job(
@@ -143,9 +146,9 @@ def create_job(payload: CreateJobIn, request: Request):
             updated_at=now(),
         )
 
-        # ✅ 공정 저장(모델에 컬럼이 있을 때만)
+        # ✅ 공정 저장
         if hasattr(job, "processes_json"):
-            job.processes_json = json.dumps(payload.processes, ensure_ascii=False)
+            job.processes_json = json.dumps(processes, ensure_ascii=False)
 
         db.add(job)
         db.commit()
@@ -153,7 +156,6 @@ def create_job(payload: CreateJobIn, request: Request):
         return job_to_out(job, request)
     finally:
         db.close()
-
 
 @app.get("/v1/jobs/{job_id}", response_model=dict)
 def get_job(job_id: str, request: Request):
@@ -167,7 +169,6 @@ def get_job(job_id: str, request: Request):
         return {"job": out.model_dump(), "log": {}}
     finally:
         db.close()
-
 
 @app.post("/v1/jobs/{job_id}/upload", response_model=dict)
 async def upload_step(job_id: str, request: Request, step: UploadFile = File(...)):
@@ -211,15 +212,14 @@ async def upload_step(job_id: str, request: Request, step: UploadFile = File(...
     finally:
         db.close()
 
-
 def _ensure_processes_selected(job: Job) -> list[str]:
+    # ✅ MVP: 비어있으면 laser로 간주
     processes = _safe_json_load(getattr(job, "processes_json", None), [])
     if not processes:
-        raise HTTPException(status_code=400, detail="가공 방식을 선택해 주세요")
+        return ["laser"]
     if not isinstance(processes, list):
         raise HTTPException(status_code=400, detail="processes 형식이 올바르지 않습니다")
     return processes
-
 
 def _build_quotes_and_validation(
     processes: list[str],
@@ -233,8 +233,6 @@ def _build_quotes_and_validation(
     validation_map: dict[str, Any] = {}
 
     for proc in processes:
-        # proc는 schemas에서 laser/waterjet로 제한되지만,
-        # DB가 꼬였을 때도 서버가 죽지 않도록 방어
         if proc not in ("laser", "waterjet"):
             continue
 
@@ -249,10 +247,17 @@ def _build_quotes_and_validation(
         )
 
     if not quotes_list:
-        raise HTTPException(status_code=400, detail="가공 방식을 선택해 주세요")
+        # ✅ MVP: 여기까지 왔는데도 비면 기본 laser
+        est = estimate_won("laser", material, used_th, qty, metrics)
+        quotes_list = [est]
+        validation_map["laser"] = build_validation(
+            used_th,
+            auto_th if auto_th > 0 else None,
+            metrics,
+            "laser",
+        )
 
     return quotes_list, validation_map
-
 
 @app.post("/v1/jobs/{job_id}/quote", response_model=QuoteOut)
 def quote(job_id: str, request: Request):
@@ -316,7 +321,6 @@ def quote(job_id: str, request: Request):
         job.metrics_json = json.dumps(metrics, ensure_ascii=False)
         job.validation_json = json.dumps(validation_map, ensure_ascii=False)
 
-        # ✅ 공정별 견적 저장
         if hasattr(job, "quotes_json"):
             job.quotes_json = json.dumps(quotes_list, ensure_ascii=False)
 
@@ -330,7 +334,6 @@ def quote(job_id: str, request: Request):
         return QuoteOut(status="ok", job=out, quotes=quotes_out)
     finally:
         db.close()
-
 
 @app.post("/v1/jobs/{job_id}/start", response_model=JobOut)
 def start_convert(job_id: str, request: Request):
@@ -389,9 +392,16 @@ def start_convert(job_id: str, request: Request):
         job.updated_at = now()
         db.commit()
 
+        # =========================
+        # ✅ 요청 1: DXF 생성 시점/경로/존재 로그
+        # =========================
         outp = dxf_path(job_id)
-        conv = run_convert(str(sp), str(outp))
+        logger.info(f"[start] job={job_id} cad={str(sp)} dxf_target={str(outp)} exists_before={outp.exists()}")
 
+        conv = run_convert(str(sp), str(outp))
+        logger.info(f"[start] job={job_id} run_convert returned: {conv}")
+
+        # run_convert 실패
         if not isinstance(conv, dict) or conv.get("status") != "ok":
             job.status = JobStatus.ERROR
             job.error_message = (conv.get("message") if isinstance(conv, dict) else None) or "convert failed"
@@ -400,15 +410,29 @@ def start_convert(job_id: str, request: Request):
             db.refresh(job)
             return job_to_out(job, request)
 
+        # =========================
+        # ✅ 요청 2: DONE은 "DXF 파일 생성 성공" 이후에만
+        # =========================
+        if not outp.exists():
+            job.status = JobStatus.ERROR
+            job.error_message = f"convert ok but dxf missing at {str(outp)}"
+            job.updated_at = now()
+            db.commit()
+            db.refresh(job)
+            logger.error(f"[start] job={job_id} dxf missing after convert: {str(outp)}")
+            return job_to_out(job, request)
+
+        size = outp.stat().st_size
+        logger.info(f"[start] job={job_id} dxf_created path={str(outp)} size={size}")
+
         job.status = JobStatus.DONE
         job.updated_at = now()
         db.commit()
         db.refresh(job)
-
         return job_to_out(job, request)
+
     finally:
         db.close()
-
 
 @app.get("/v1/jobs/{job_id}/download/dxf")
 def download_dxf(job_id: str):
@@ -418,12 +442,17 @@ def download_dxf(job_id: str):
         if not job:
             raise HTTPException(404, "job not found")
 
-        if job.status != JobStatus.DONE:
-            raise HTTPException(409, "dxf not ready")
-
         p = dxf_path(job_id)
-        if not p.exists():
-            raise HTTPException(500, "dxf file missing")
+
+        # =========================
+        # ✅ 요청 3(MVP): status 체크 제거
+        # "파일 존재"만으로 다운로드 허용
+        # =========================
+        exists = p.exists()
+        logger.info(f"[download] job={job_id} dxf_path={str(p)} exists={exists} status={job.status.value}")
+
+        if not exists:
+            raise HTTPException(409, "dxf not ready")
 
         data = p.read_bytes()
         headers = {
@@ -433,7 +462,6 @@ def download_dxf(job_id: str):
         return StreamingResponse(io.BytesIO(data), media_type="application/dxf", headers=headers)
     finally:
         db.close()
-
 
 @app.get("/v1/jobs/{job_id}/preview.svg")
 def preview_svg(job_id: str):
@@ -446,7 +474,6 @@ def preview_svg(job_id: str):
         headers={"Cache-Control": "no-store"},
     )
 
-
 @app.post("/v1/vendors/seed", response_model=dict)
 def seed_vendor():
     db = SessionLocal()
@@ -458,7 +485,6 @@ def seed_vendor():
         return {"vendor_id": v.id, "name": v.name}
     finally:
         db.close()
-
 
 @app.post("/v1/jobs/{job_id}/dispatch", response_model=dict)
 def create_dispatch(job_id: str, payload: DispatchCreateIn):

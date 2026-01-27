@@ -256,45 +256,107 @@ def _poly_area_shoelace(pts: List[Tuple[float, float]]) -> float:
     return float(a) / 2.0
 
 
+def _is_closed_loop(pts: List[Tuple[float, float]], tol: float = 1e-6) -> bool:
+    if len(pts) < 3:
+        return False
+    sx, sy = pts[0]
+    ex, ey = pts[-1]
+    return (abs(sx - ex) <= tol) and (abs(sy - ey) <= tol)
+
+
 def _metrics_from_polylines(polylines: List[List[Tuple[float, float]]]) -> Dict[str, Any]:
-    loops = 0
-    total_len = 0.0
-    total_area = 0.0
+    """
+    ✅ 요구사항 반영:
+    - outer(가장 큰 면적 폐곡선) / holes(나머지 폐곡선) 분리
+    - 가공 길이 = outer_perimeter + hole_total_perimeter
+    - 피어싱 수(loops) = outer 1 + hole_count
+    - 소재비용 기준 bbox_area_mm2 = bbox_w * bbox_h
+    """
     xmin = ymin = float("inf")
     xmax = ymax = float("-inf")
+
+    closed_perims: List[float] = []
+    closed_areas: List[float] = []
+
+    open_len = 0.0
 
     for pts in polylines:
         if len(pts) < 2:
             continue
 
+        # bbox는 전체 점 기준(outer+hole 포함)
         for x, y in pts:
             xmin = min(xmin, x)
             ymin = min(ymin, y)
             xmax = max(xmax, x)
             ymax = max(ymax, y)
 
-        total_len += _polyline_length(pts)
-
-        # 닫힘 판정
-        closed = False
-        if len(pts) >= 3:
-            sx, sy = pts[0]
-            ex, ey = pts[-1]
-            closed = (abs(sx - ex) <= 1e-6 and abs(sy - ey) <= 1e-6)
-
-        if closed:
-            loops += 1
-            total_area += abs(_poly_area_shoelace(pts))
+        if _is_closed_loop(pts):
+            per = _polyline_length(pts)
+            ar = abs(_poly_area_shoelace(pts))
+            closed_perims.append(float(per))
+            closed_areas.append(float(ar))
+        else:
+            open_len += _polyline_length(pts)
 
     if xmin == float("inf"):
         xmin = ymin = xmax = ymax = 0.0
 
+    bbox_w = float(xmax - xmin)
+    bbox_h = float(ymax - ymin)
+    bbox_area = float(max(bbox_w, 0.0) * max(bbox_h, 0.0))
+
+    loops = len(closed_perims)
+
+    outer_perim = 0.0
+    hole_total_perim = 0.0
+    hole_count = 0
+
+    gross_area = 0.0
+    holes_area = 0.0
+    net_area = 0.0
+
+    if loops >= 1:
+        outer_idx = max(range(loops), key=lambda i: closed_areas[i])
+        outer_perim = float(closed_perims[outer_idx])
+        gross_area = float(closed_areas[outer_idx])
+
+        hole_perims = [closed_perims[i] for i in range(loops) if i != outer_idx]
+        hole_areas = [closed_areas[i] for i in range(loops) if i != outer_idx]
+
+        hole_total_perim = float(sum(hole_perims))
+        hole_count = int(len(hole_perims))
+
+        holes_area = float(sum(hole_areas))
+        net_area = float(max(gross_area - holes_area, 0.0))
+
+    cut_length = float(outer_perim + hole_total_perim)
+
     return {
+        # 기존 키(호환)
         "loops": int(loops),
-        "perimeter_mm": float(total_len),
-        "area_mm2": float(total_area),
-        "bbox_mm": {"w": float(xmax - xmin), "h": float(ymax - ymin)},
-        "bbox_xy": {"xmin": float(xmin), "ymin": float(ymin), "xmax": float(xmax), "ymax": float(ymax)},
+        "perimeter_mm": float(cut_length),     # ✅ 이제 "실제 커팅 길이"로 사용
+        "area_mm2": float(net_area),           # ✅ (outer - holes) net area
+        "bbox_mm": {
+            "w": float(bbox_w),
+            "h": float(bbox_h),
+            "area_mm2": float(bbox_area),
+        },
+        "bbox_xy": {
+            "xmin": float(xmin),
+            "ymin": float(ymin),
+            "xmax": float(xmax),
+            "ymax": float(ymax),
+        },
+
+        # 새 키(견적 세부화용)
+        "cut_length_mm": float(cut_length),
+        "outer_perimeter_mm": float(outer_perim),
+        "hole_count": int(hole_count),
+        "hole_total_perimeter_mm": float(hole_total_perim),
+        "gross_area_mm2": float(gross_area),
+        "holes_area_mm2": float(holes_area),
+        "open_strokes_len_mm": float(open_len),
     }
 
 
@@ -331,12 +393,7 @@ def _write_dxf_from_polylines(out_dxf: str, polylines: List[List[Tuple[float, fl
         if len(pts) < 2:
             continue
 
-        # 닫힘 판정
-        close_flag = False
-        if len(pts) >= 3:
-            sx, sy = pts[0]
-            ex, ey = pts[-1]
-            close_flag = (abs(sx - ex) <= 1e-6 and abs(sy - ey) <= 1e-6)
+        close_flag = _is_closed_loop(pts)
 
         # close_flag면 마지막 점 제거하고 close로 닫기
         if close_flag and len(pts) >= 2:
@@ -376,8 +433,6 @@ def _svg_from_polylines(polylines: List[List[Tuple[float, float]]], stroke_mm: f
     w += 2 * pad
     h += 2 * pad
 
-    # SVG는 y가 아래로 증가하므로, y축 뒤집기 위해 transform 사용
-    # viewBox: xmin ymin w h 를 쓰고, 내부에서 scale(1,-1) + translate로 뒤집음
     paths = []
     for pts in polylines:
         if len(pts) < 2:
@@ -492,7 +547,7 @@ def convert_step_to_dxf(step_path: str, out_dxf: str, opts: Optional[ConvertOpti
       - status: ok/failed
       - out_dxf
       - thickness_mm
-      - metrics (loops, perimeter_mm, area_mm2, bbox_mm)
+      - metrics (loops, cut_length_mm, bbox_mm.area_mm2, hole_count, ...)
       - svg (if opts.make_svg True)
       - debug (if opts.debug True)
     """
@@ -517,7 +572,6 @@ def convert_step_to_dxf(step_path: str, out_dxf: str, opts: Optional[ConvertOpti
 
         doc.recompute()
 
-        # ---- 여기부터는 import 성공 후 공통 로직 (반드시 try 안에서 실행) ----
         shapes = []
         for obj in doc.Objects:
             if hasattr(obj, "Shape") and getattr(obj.Shape, "ShapeType", ""):
@@ -643,10 +697,8 @@ def convert_step_to_dxf(step_path: str, out_dxf: str, opts: Optional[ConvertOpti
         }
 
     except ConvertError:
-        # ConvertError는 그대로 위로
         raise
     except Exception as e:
-        # 그 외 예외는 ConvertError로 감싸서 올림
         raise ConvertError(f"CAD import/processing 실패 ({ext}): {type(e).__name__}: {e}")
 
     finally:

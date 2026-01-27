@@ -1,10 +1,11 @@
 services:
   backend:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "8080:8000"
     volumes:
       - ./backend/data:/app/data
     environment:
